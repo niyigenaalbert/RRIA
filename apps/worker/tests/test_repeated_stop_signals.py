@@ -36,13 +36,17 @@ async def test_a_second_stop_signal_does_not_cut_the_teardown_short(
             torn_down.append(True)
 
     monkeypatch.setattr(entrypoint, "configure_logging", lambda **_kwargs: None)
-    monkeypatch.setattr(entrypoint.workflows, "discover_all_workflows_in_package", lambda _package: [])
+    monkeypatch.setattr(
+        entrypoint.workflows, "discover_all_workflows_in_package", lambda _package: []
+    )
     monkeypatch.setattr(workflows_client, "run_worker", _serve_forever)
 
     loop = asyncio.get_running_loop()
     stop_signals = (signal.SIGTERM, signal.SIGINT)
     # `remove_signal_handler` resets to the default, not to what the test runner had installed.
-    previous = {stop_signal: signal.getsignal(stop_signal) for stop_signal in stop_signals}
+    previous = {
+        stop_signal: signal.getsignal(stop_signal) for stop_signal in stop_signals
+    }
     served = asyncio.create_task(entrypoint.main())
     try:
         await started.wait()

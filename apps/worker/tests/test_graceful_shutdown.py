@@ -10,7 +10,9 @@ from mistralai_capabilities.workflows import client as workflows_client
 from worker.entrypoints import worker as entrypoint
 
 
-async def test_sigterm_cancels_the_worker_so_its_teardown_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sigterm_cancels_the_worker_so_its_teardown_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     started = asyncio.Event()
     torn_down: list[bool] = []
 
@@ -22,7 +24,9 @@ async def test_sigterm_cancels_the_worker_so_its_teardown_runs(monkeypatch: pyte
             torn_down.append(True)
 
     monkeypatch.setattr(entrypoint, "configure_logging", lambda **_kwargs: None)
-    monkeypatch.setattr(entrypoint.workflows, "discover_all_workflows_in_package", lambda _package: [])
+    monkeypatch.setattr(
+        entrypoint.workflows, "discover_all_workflows_in_package", lambda _package: []
+    )
     monkeypatch.setattr(workflows_client, "run_worker", _serve_forever)
 
     served = asyncio.create_task(entrypoint.main())

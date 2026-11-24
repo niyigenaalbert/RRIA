@@ -7,7 +7,7 @@ deterministic orchestration and rendered output are asserted.
 import asyncio
 import smtplib
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, MagicMock
 
 import pytest
 from mistralai.workflows.testing import create_test_worker
@@ -63,15 +63,9 @@ SAMPLE_BRIEF = Brief(
 
 
 def _mock_mistral(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_client = MagicMock()
-    fake_client.chat.complete_async = AsyncMock(
-        return_value=MagicMock(
-            choices=[
-                MagicMock(message=MagicMock(content=SAMPLE_BRIEF.model_dump_json()))
-            ]
-        )
-    )
-    monkeypatch.setattr(rb, "get_mistral_client", lambda: fake_client)
+    payload = {"choices": [{"message": {"content": SAMPLE_BRIEF.model_dump_json()}}]}
+    monkeypatch.setattr(rb, "mistral_chat", AsyncMock(return_value=payload))
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
 
 
 async def test_dry_run_renders_brief_without_email(temporal_env, monkeypatch) -> None:

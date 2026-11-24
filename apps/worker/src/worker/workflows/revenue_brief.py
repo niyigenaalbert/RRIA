@@ -9,7 +9,6 @@ import os
 from datetime import timedelta
 
 import mistralai.workflows as workflows
-from mistralai.workflows.plugins.mistralai import get_mistral_client
 from pydantic import ValidationError
 
 from worker.workflows.brief_core import (  # noqa: F401  (re-exported for tests)
@@ -26,6 +25,8 @@ from worker.workflows.brief_core import (  # noqa: F401  (re-exported for tests)
     FINDINGS_HEADER,
     KIGALI_TZ,
     RESEARCH_PROMPT,
+    mistral_chat,
+    response_format_for,
     RevenueForecast,
     _separator,
     _summary_bullets,
@@ -55,15 +56,18 @@ async def current_kigali_date() -> str:
     retry_policy_backoff_coefficient=2.0,
 )
 async def collect_intelligence(date: str) -> str:
-    import mistralai.client.models as mistral_models
-
-    client = get_mistral_client()
-    response = await client.chat.complete_async(
-        model=RESEARCH_MODEL,
-        messages=[{"role": "user", "content": RESEARCH_PROMPT.format(date=date)}],
-        tools=[mistral_models.WebSearchTool()],
-    )
-    content = response.choices[0].message.content if response.choices else None
+    api_key = os.environ.get("MISTRAL_API_KEY", "")
+    if not api_key:
+        raise workflows.WorkflowError(
+            "mistral_api_key_not_configured", non_retryable=True
+        )
+    payload = {
+        "model": RESEARCH_MODEL,
+        "messages": [{"role": "user", "content": RESEARCH_PROMPT.format(date=date)}],
+        "tools": [{"type": "web_search"}],
+    }
+    data = await mistral_chat(api_key, payload)
+    content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
     if not content:
         raise workflows.WorkflowError(
             "research_returned_no_content", non_retryable=True
@@ -78,13 +82,14 @@ async def collect_intelligence(date: str) -> str:
     retry_policy_backoff_coefficient=2.0,
 )
 async def draft_brief(findings: str, date: str) -> Brief:
-    import mistralai.client.models as mistral_models
-    from mistralai.extra import response_format_from_pydantic_model
-
-    client = get_mistral_client()
-    response = await client.chat.complete_async(
-        model=RESEARCH_MODEL,
-        messages=[
+    api_key = os.environ.get("MISTRAL_API_KEY", "")
+    if not api_key:
+        raise workflows.WorkflowError(
+            "mistral_api_key_not_configured", non_retryable=True
+        )
+    payload = {
+        "model": RESEARCH_MODEL,
+        "messages": [
             {
                 "role": "user",
                 "content": FINDINGS_HEADER.format(findings=findings)
@@ -92,11 +97,10 @@ async def draft_brief(findings: str, date: str) -> Brief:
                 + DRAFT_PROMPT.format(date=date),
             }
         ],
-        response_format=mistral_models.ResponseFormat.model_validate(
-            response_format_from_pydantic_model(Brief)
-        ),
-    )
-    content = response.choices[0].message.content if response.choices else None
+        "response_format": response_format_for(Brief),
+    }
+    data = await mistral_chat(api_key, payload)
+    content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
     if not content:
         raise workflows.WorkflowError("draft_returned_no_content", non_retryable=True)
     try:

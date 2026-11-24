@@ -5,7 +5,7 @@ using the shared core in `brief_core.py`: research via Mistral web search, draft
 into the fixed brief format, deliver via Gmail SMTP.
 
 Required environment:
-- MISTRAL_API_KEY: Mistral API key (Models/Chat + web search are billed per use)
+- MISTRAL_API_KEY: Mistral API key (chat completions with web search are billed per use)
 - GMAIL_APP_PASSWORD: Gmail app password of the sending account (2-Step Verification)
 Optional environment:
 - BRIEF_RECIPIENT_EMAIL: destination address (default: the coded default)
@@ -15,6 +15,7 @@ Usage: python scripts/send_daily_brief.py [--dry-run] [--recipient someone@examp
 """
 
 import argparse
+import asyncio
 import os
 import smtplib
 import sys
@@ -22,6 +23,8 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
+
+from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "apps" / "worker" / "src"))
 
@@ -34,7 +37,9 @@ from worker.workflows.brief_core import (  # noqa: E402
     RESEARCH_MODEL,
     RESEARCH_PROMPT,
     Brief,
+    mistral_chat,
     render_brief,
+    response_format_for,
 )
 
 
@@ -45,25 +50,26 @@ def _required(name: str) -> str:
     return value
 
 
-def _research(client, date: str) -> str:
-    import mistralai.client.models as mistral_models
-
-    response = client.chat.complete(
-        model=RESEARCH_MODEL,
-        messages=[{"role": "user", "content": RESEARCH_PROMPT.format(date=date)}],
-        tools=[mistral_models.WebSearchTool()],
-    )
-    content = response.choices[0].message.content if response.choices else None
+def _content(data: dict) -> str:
+    content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
     if not content:
-        raise SystemExit("Research step returned no content")
+        raise SystemExit("Mistral returned no content")
     return content
 
 
-def _draft(client, findings: str, date: str) -> Brief:
-    response = client.chat.parse(
-        model=RESEARCH_MODEL,
-        response_format=Brief,
-        messages=[
+async def _research(api_key: str, date: str) -> str:
+    payload = {
+        "model": RESEARCH_MODEL,
+        "messages": [{"role": "user", "content": RESEARCH_PROMPT.format(date=date)}],
+        "tools": [{"type": "web_search"}],
+    }
+    return _content(await mistral_chat(api_key, payload))
+
+
+async def _draft(api_key: str, findings: str, date: str) -> Brief:
+    payload = {
+        "model": RESEARCH_MODEL,
+        "messages": [
             {
                 "role": "user",
                 "content": FINDINGS_HEADER.format(findings=findings)
@@ -71,11 +77,13 @@ def _draft(client, findings: str, date: str) -> Brief:
                 + DRAFT_PROMPT.format(date=date),
             }
         ],
-    )
-    parsed = response.choices[0].message.parsed if response.choices else None
-    if not isinstance(parsed, Brief):
-        raise SystemExit("Draft step did not return a valid Brief")
-    return parsed
+        "response_format": response_format_for(Brief),
+    }
+    data = await mistral_chat(api_key, payload)
+    try:
+        return Brief.model_validate_json(_content(data))
+    except ValidationError as exc:
+        raise SystemExit(f"Draft step returned an invalid Brief: {exc}") from exc
 
 
 def _send(recipient: str, sender: str, password: str, subject: str, body: str) -> None:
@@ -113,11 +121,8 @@ def main() -> None:
 
     date = datetime.now(KIGALI_TZ).strftime("%A %d %B %Y")
 
-    from mistralai.client import Mistral
-
-    client = Mistral(api_key=api_key)
-    findings = _research(client, date)
-    brief = _draft(client, findings, date)
+    findings = asyncio.run(_research(api_key, date))
+    brief = asyncio.run(_draft(api_key, findings, date))
     rendered = render_brief(brief)
     print(rendered)
 

@@ -171,3 +171,59 @@ def render_brief(brief: Brief) -> str:
     lines.append("Recommended attention areas:")
     lines.extend(f"{i}. {action}" for i, action in enumerate(brief.actions, start=1))
     return "\n".join(lines)
+
+
+def _deny_additional_properties(schema: dict) -> dict:
+    """Strict mode requires every object schema to forbid additional properties."""
+    if isinstance(schema, dict):
+        if schema.get("type") == "object":
+            schema.setdefault("additionalProperties", False)
+        for key in ("properties", "$defs", "items"):
+            value = schema.get(key)
+            if isinstance(value, dict):
+                if key in ("$defs", "properties"):
+                    for inner in value.values():
+                        _deny_additional_properties(inner)
+                else:
+                    _deny_additional_properties(value)
+            elif isinstance(value, list):
+                for item in value:
+                    _deny_additional_properties(item)
+        for key in ("anyOf", "allOf", "oneOf", "prefixItems"):
+            for item in schema.get(key) or []:
+                _deny_additional_properties(item)
+    return schema
+
+
+def response_format_for(model_class: type[BaseModel]) -> dict:
+    """Strict JSON-schema response format accepted by the chat completions endpoint."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": model_class.__name__.lower(),
+            "strict": True,
+            "schema": _deny_additional_properties(model_class.model_json_schema()),
+        },
+    }
+
+
+async def mistral_chat(api_key: str, payload: dict) -> dict:
+    """One chat-completions API call over HTTP.
+
+    The `mistralai` SDK's request models reject the server-side `web_search`
+    tool, which this brief needs, so the endpoint is called directly. httpx is
+    imported here so importing brief_core stays side-effect free.
+    """
+    import httpx
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        response = await client.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+        )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"mistral_chat failed: HTTP {response.status_code}: {response.text[:300]}"
+        )
+    return response.json()

@@ -49,5 +49,25 @@ bash tools/uv.sh tool run ruff@0.13.3 check apps/worker/src
 
 ## Deployment
 
-Deployed as a managed workflow deployment from this repository; the schedule
-(daily 09:00 Kigali = `0 7 * * *` UTC) is created on the deployment.
+### GitHub Actions (active scheduler)
+
+`.github/workflows/daily-brief.yml` runs daily at 07:00 UTC (09:00 Kigali),
+and can be triggered manually via **Run workflow** with an optional
+`--dry-run` and recipient override.
+
+Repository secrets required (Settings → Secrets and variables → Actions):
+
+| Secret                | Value                          |
+| --------------------- | ------------------------------ |
+| `MISTRAL_API_KEY`     | Mistral API key                |
+| `GMAIL_APP_PASSWORD`  | Gmail app password             |
+| `GMAIL_FROM_USER`     | Optional: sending address      |
+| `BRIEF_RECIPIENT_EMAIL` | Optional: recipient address  |
+
+Only `MISTRAL_API_KEY` and `GMAIL_APP_PASSWORD` are mandatory; the addresses
+default to the coded values.
+
+### Managed deployment (optional)
+
+The worker also deploys as a managed Mistral workflow deployment from this
+repository (requires org quota); Mistral Studio schedules attach to it.

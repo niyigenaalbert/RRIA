@@ -65,6 +65,9 @@ SAMPLE_BRIEF = Brief(
 def _mock_mistral(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"choices": [{"message": {"content": SAMPLE_BRIEF.model_dump_json()}}]}
     monkeypatch.setattr(rb, "mistral_chat", AsyncMock(return_value=payload))
+    monkeypatch.setattr(
+        rb, "mistral_conversation", AsyncMock(return_value="raw findings")
+    )
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
 
 

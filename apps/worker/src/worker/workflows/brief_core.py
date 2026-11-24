@@ -207,6 +207,41 @@ def response_format_for(model_class: type[BaseModel]) -> dict:
     }
 
 
+async def mistral_conversation(
+    api_key: str, model: str, prompt: str, tools: list[dict]
+) -> str:
+    """One Conversations API call — the only surface that accepts web_search.
+
+    Returns the final assistant message text.
+    """
+    import httpx
+
+    payload = {"model": model, "inputs": prompt, "store": False, "tools": tools}
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.post(
+            "https://api.mistral.ai/v1/conversations",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+        )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"mistral_conversation failed: HTTP {response.status_code}: {response.text[:300]}"
+        )
+    outputs = response.json().get("outputs") or []
+    for entry in reversed(outputs):
+        if entry.get("type") != "message.output":
+            continue
+        content = entry.get("content")
+        if isinstance(content, list):
+            content = "".join(
+                chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                for chunk in content
+            )
+        if content:
+            return content
+    raise RuntimeError("mistral_conversation returned no assistant message")
+
+
 async def mistral_chat(api_key: str, payload: dict) -> dict:
     """One chat-completions API call over HTTP.
 

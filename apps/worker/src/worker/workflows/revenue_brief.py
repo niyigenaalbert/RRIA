@@ -26,6 +26,7 @@ from worker.workflows.brief_core import (  # noqa: F401  (re-exported for tests)
     KIGALI_TZ,
     RESEARCH_PROMPT,
     mistral_chat,
+    mistral_conversation,
     response_format_for,
     RevenueForecast,
     _separator,
@@ -61,17 +62,15 @@ async def collect_intelligence(date: str) -> str:
         raise workflows.WorkflowError(
             "mistral_api_key_not_configured", non_retryable=True
         )
-    payload = {
-        "model": RESEARCH_MODEL,
-        "messages": [{"role": "user", "content": RESEARCH_PROMPT.format(date=date)}],
-        "tools": [{"type": "web_search"}],
-    }
-    data = await mistral_chat(api_key, payload)
-    content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
-    if not content:
-        raise workflows.WorkflowError(
-            "research_returned_no_content", non_retryable=True
+    try:
+        content = await mistral_conversation(
+            api_key,
+            RESEARCH_MODEL,
+            RESEARCH_PROMPT.format(date=date),
+            [{"type": "web_search"}],
         )
+    except RuntimeError as error:
+        raise workflows.WorkflowError("research_request_failed") from error
     return content
 
 

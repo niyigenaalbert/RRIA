@@ -5,7 +5,7 @@ using the shared core in `brief_core.py`: research via Mistral web search, draft
 into the fixed brief format, deliver via Gmail SMTP.
 
 Required environment:
-- MISTRAL_API_KEY: Mistral API key (chat completions with web search are billed per use)
+- MISTRAL_API_KEY: Mistral API key (web search runs on the Conversations API)
 - GMAIL_APP_PASSWORD: Gmail app password of the sending account (2-Step Verification)
 Optional environment:
 - BRIEF_RECIPIENT_EMAIL: destination address (default: the coded default)
@@ -38,6 +38,7 @@ from worker.workflows.brief_core import (  # noqa: E402
     RESEARCH_PROMPT,
     Brief,
     mistral_chat,
+    mistral_conversation,
     render_brief,
     response_format_for,
 )
@@ -58,12 +59,12 @@ def _content(data: dict) -> str:
 
 
 async def _research(api_key: str, date: str) -> str:
-    payload = {
-        "model": RESEARCH_MODEL,
-        "messages": [{"role": "user", "content": RESEARCH_PROMPT.format(date=date)}],
-        "tools": [{"type": "web_search"}],
-    }
-    return _content(await mistral_chat(api_key, payload))
+    return await mistral_conversation(
+        api_key,
+        RESEARCH_MODEL,
+        RESEARCH_PROMPT.format(date=date),
+        [{"type": "web_search"}],
+    )
 
 
 async def _draft(api_key: str, findings: str, date: str) -> Brief:

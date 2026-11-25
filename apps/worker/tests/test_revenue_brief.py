@@ -1,18 +1,19 @@
 """Tests for the Daily Revenue Intelligence Brief workflow.
 
-External effects (web search chat completion, Gmail SMTP) are mocked; the
-deterministic orchestration and rendered output are asserted.
+External effects (source fetching, Mistral chat completions, Gmail SMTP) are
+mocked; the deterministic orchestration and rendered output are asserted.
 """
 
 import asyncio
 import smtplib
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from mistralai.workflows.testing import create_test_worker
 
 from worker.workflows import revenue_brief as rb
+from worker.workflows import brief_core
 from worker.workflows.revenue_brief import (
     Brief,
     BriefUpdate,
@@ -64,11 +65,64 @@ SAMPLE_BRIEF = Brief(
 
 def _mock_mistral(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"choices": [{"message": {"content": SAMPLE_BRIEF.model_dump_json()}}]}
-    monkeypatch.setattr(rb, "mistral_chat", AsyncMock(return_value=payload))
     monkeypatch.setattr(
-        rb, "mistral_conversation", AsyncMock(return_value="raw findings")
+        rb,
+        "research_findings",
+        AsyncMock(return_value="RRA: VAT update. NISR: CPI up 2 points."),
     )
+    monkeypatch.setattr(rb, "mistral_chat", AsyncMock(return_value=payload))
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+
+async def test_research_findings_wires_material_into_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(
+        brief_core, "fetch_material", AsyncMock(return_value="== RRA ==\nheadline one")
+    )
+    captured = {}
+
+    async def fake_chat(api_key: str, payload: dict) -> dict:
+        captured["api_key"] = api_key
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "findings text"}}]}
+
+    monkeypatch.setattr(brief_core, "mistral_chat", fake_chat)
+    monkeypatch.delenv("MISTRAL_MODEL", raising=False)
+
+    out = await brief_core.research_findings("key-123", "Monday 12 May 2026")
+
+    assert out == "findings text"
+    assert captured["api_key"] == "key-123"
+    content = captured["payload"]["messages"][0]["content"]
+    assert "Monday 12 May 2026" in content
+    assert "== RRA ==\nheadline one" in content
+    assert captured["payload"]["model"] == brief_core.RESEARCH_MODEL
+    assert "tools" not in captured["payload"]
+
+
+def test_html_to_text_strips_markup() -> None:
+    markup = (
+        "<html><head><title>News</title></head><body>"
+        "<script>var tracked = 1;</script>"
+        "<nav><a href='/menu'>Menu item filler</a></nav>"
+        "<a href='/n1'>Corridor upgrade boosts trade</a>"
+        "</body></html>"
+    )
+    text = brief_core.html_to_text(markup)
+    assert "Corridor upgrade boosts trade" in text
+    assert "var tracked" not in text
+
+
+def test_rss_headlines_extracts_titles() -> None:
+    xml = (
+        "<rss><channel>"
+        "<item><title>Kigali port volumes rise</title>"
+        "<link><![CDATA[https://ktpress.example/post-1]]></link>"
+        "<pubDate>Thu, 14 May 2026 07:00:00 +0000</pubDate></item>"
+        "</channel></rss>"
+    )
+    out = brief_core.rss_headlines(xml)
+    assert "- Kigali port volumes rise (https://ktpress.example/post-1)" in out
+    assert "[Thu, 14 May 2026" in out
 
 
 async def test_dry_run_renders_brief_without_email(temporal_env, monkeypatch) -> None:

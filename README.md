@@ -10,7 +10,9 @@ format, and emails it every morning at 09:00 Kigali time (CAT, UTC+2).
 `revenue-intelligence-brief` (`apps/worker/src/worker/workflows/revenue_brief.py`):
 
 1. `brief-current-kigali-date` — current Kigali date (CAT, UTC+2).
-2. `brief-collect-intelligence` — web-search research across institutions and press.
+2. `brief-collect-intelligence` — research: institutional sites and local press are fetched
+   directly over HTTP (no Mistral web search / subscription needed), then summarized with a
+   plain chat-completions call.
 3. `brief-draft-brief` — structured draft into the fixed brief format (JSON schema-constrained).
 4. `brief-send-email` — delivery over Gmail SMTP.
 
@@ -26,6 +28,7 @@ Input fields (`BriefInput`):
 | Variable              | Source                                                        |
 | --------------------- | ------------------------------------------------------------- |
 | `MISTRAL_API_KEY`     | Seeded from the Mistral platform for managed deployments      |
+| `MISTRAL_MODEL`       | Optional model override (default: `mistral-small-latest`, free-tier safe) |
 | `GMAIL_APP_PASSWORD`  | **Workspace secret** in Mistral Studio (Gmail app password)   |
 | `GMAIL_FROM_USER`     | Plain env / Workspace secret — the sending Gmail address      |
 | `BRIEF_RECIPIENT_EMAIL` | Plain env / Workspace secret — default recipient            |

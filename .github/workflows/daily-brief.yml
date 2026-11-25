@@ -40,6 +40,7 @@ jobs:
         env:
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MISTRAL_MODEL: ${{ vars.MISTRAL_MODEL }}
           BRIEF_RECIPIENT_EMAIL: ${{ secrets.BRIEF_RECIPIENT_EMAIL }}
           GMAIL_FROM_USER: ${{ secrets.GMAIL_FROM_USER }}
         run: |

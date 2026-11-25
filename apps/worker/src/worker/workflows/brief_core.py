@@ -2,11 +2,17 @@
 
 Pure logic and constants only (no SDK imports) so the GitHub Actions entry
 point can reuse this module as well as the Mistral workflow.
+
+Research strategy (no subscription needed): institutional sites and local
+press are fetched directly over HTTP, and only plain chat-completions calls
+summarize/draft — no Conversations API or Mistral `web_search` tool.
 """
 
 from __future__ import annotations
 
+import os
 from datetime import timedelta, timezone
+from html.parser import HTMLParser
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,7 +23,15 @@ DEFAULT_RECIPIENT_EMAIL = "nigalbrt@gmail.com"
 RECIPIENT_ENV = "BRIEF_RECIPIENT_EMAIL"
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
-RESEARCH_MODEL = "mistral-medium-latest"
+# mistral-small-latest runs on every plan including the free tier; override
+# with the MISTRAL_MODEL environment variable for higher-quality drafting
+# once a subscription is active.
+RESEARCH_MODEL = "mistral-small-latest"
+
+
+def brief_model() -> str:
+    return os.environ.get("MISTRAL_MODEL", "").strip() or RESEARCH_MODEL
+
 
 SECTION_ORDER: tuple[
     tuple[Literal["domestic", "macroeconomic", "international"], str], ...
@@ -27,28 +41,41 @@ SECTION_ORDER: tuple[
     ("international", "International Updates"),
 )
 
+USER_AGENT = "Mozilla/5.0 (compatible; RevenueBrief/1.0; daily revenue digest)"
+
+# (label, url, kind) — kind is one of "html", "rss", "json".
+SOURCES: tuple[tuple[str, str, str], ...] = (
+    ("RRA", "https://www.rra.gov.rw/", "html"),
+    ("MINECOFIN", "https://www.minecofin.gov.rw/news", "html"),
+    ("NISR", "https://www.statistics.gov.rw/", "html"),
+    ("BNR", "https://www.bnr.rw/news/?lang=en", "json"),
+    ("RDB", "https://www.rdb.rw/what-we-do/media", "html"),
+    ("The New Times", "https://www.newtimes.co.rw/rss/", "html"),
+    ("KT Press", "https://www.ktpress.rw/feed/", "rss"),
+)
+
+PER_SOURCE_CHARS = 4000
+TOTAL_MATERIAL_CHARS = 48000
+
+MATERIAL_HEADER = "\n\n=== Fetched material (verbatim, per source) ===\n\n"
+
 RESEARCH_PROMPT = """You are a revenue-intelligence researcher for the Rwanda Revenue Authority \
 analyst desk. Today is {date} in Kigali (CAT, UTC+2).
 
-Use web search to collect today's developments that could affect Rwandan tax revenue collection. \
-Check the latest news and updates from:
-- RRA (rra.gov.rw) - rulings, ministerial orders, VAT law changes, compliance campaigns
-- MINECOFIN (minecofin.gov.rw) - budget, fiscal policy, donor financing
-- NISR (nisr.gov.rw) - CPI, trade, labour statistics
-- BNR (bnr.rw) - monetary policy, exchange rate, bank fees
-- RDB (rdb.rw) - investment registrations, manufacturing and export projects
-- Rwandan press: The New Times, IGIHE, KT Press, Rwandan Post, business/africa wire
+Below is raw material fetched this morning directly from Rwandan institutional sites and local \
+press feeds: RRA, MINECOFIN, NISR, BNR, RDB, The New Times and KT Press. Sources that failed to \
+load are marked, and ordinary site navigation text may appear — ignore it.
 
-Cover, where evidence exists today or in the last 48 hours: tax law or administrative changes, \
-inflation and macro data, fuel and utility prices, floods or droughts affecting agriculture, \
-industrial and construction activity, mining incidents, trade disputes, export shocks, IMF or \
-World Bank financing, and formalization of digital payments. Some sites block automated access; \
-prefer search-indexed headlines and verified secondary coverage over failed direct fetches.
+Identify the developments in this material from today or the last 48 hours that could affect \
+Rwandan tax revenue collection: tax law or administrative changes, VAT matters, inflation and \
+macro data, fuel and utility prices, floods or droughts affecting agriculture, industrial and \
+construction activity, mining incidents, trade disputes and export shocks, IMF or World Bank \
+financing, and formalisation of digital payments.
 
 Return concise factual findings. For each finding give: source institution or outlet, what \
 changed (with numbers where available), and the tax heads it plausibly affects. Do not invent \
-figures; say "unverified" when a claim cannot be confirmed. If nothing new is found for a \
-source, skip it."""
+figures; only use what is present in the material, and say "unverified" when a date or claim \
+cannot be confirmed from it. If nothing recent is present in a source, skip that source."""
 
 DRAFT_PROMPT = """You are a senior revenue analyst. Today is {date}. Convert the research \
 findings below into a Daily Revenue Intelligence Brief.
@@ -62,7 +89,7 @@ Rules:
 - "Actions" must list exactly 3 concrete follow-ups for revenue analysts.
 - The executive summary bullets must be one sentence each on the highest-impact changes."""
 
-FINDINGS_HEADER = """Research findings for today (from web search):
+FINDINGS_HEADER = """Research findings for today (from institutional sites and local press):
 
 {findings}"""
 
@@ -134,7 +161,7 @@ def _summary_bullets(updates: list[BriefUpdate]) -> list[str]:
 
 def render_brief(brief: Brief) -> str:
     lines: list[str] = ["Daily Revenue Intelligence Brief", "", "Executive Summary"]
-    lines.extend(f"\u2022 {b}" for b in _summary_bullets(brief.updates))
+    lines.extend(f"• {b}" for b in _summary_bullets(brief.updates))
     number = 0
     for section_key, section_title in SECTION_ORDER:
         section_updates = [u for u in brief.updates if u.section == section_key]
@@ -160,10 +187,10 @@ def render_brief(brief: Brief) -> str:
     forecast = brief.forecast
     lines.extend(
         [
-            f"\u2022 VAT: {forecast.vat}",
-            f"\u2022 Excise: {forecast.excise}",
-            f"\u2022 PAYE: {forecast.paye}",
-            f"\u2022 Customs: {forecast.customs}",
+            f"• VAT: {forecast.vat}",
+            f"• Excise: {forecast.excise}",
+            f"• PAYE: {forecast.paye}",
+            f"• Customs: {forecast.customs}",
         ]
     )
     lines.append(_separator())
@@ -207,51 +234,228 @@ def response_format_for(model_class: type[BaseModel]) -> dict:
     }
 
 
-async def mistral_conversation(
-    api_key: str, model: str, prompt: str, tools: list[dict]
-) -> str:
-    """One Conversations API call — the only surface that accepts web_search.
+# --------------------------------------------------------------------------
+# Direct source fetching (no Mistral web search required)
+# --------------------------------------------------------------------------
 
-    Returns the final assistant message text.
-    """
+_SKIP_TAGS = frozenset({"script", "style", "noscript"})
+_BLOCK_TAGS = frozenset(
+    {
+        "p",
+        "div",
+        "br",
+        "li",
+        "tr",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "section",
+        "article",
+        "table",
+        "figure",
+        "header",
+        "footer",
+        "nav",
+    }
+)
+
+
+class _PageReader(HTMLParser):
+    """Collects visible text; anchor texts land in the stream on close."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip = 0
+        self._chunks: list[str] = []
+        self._anchor_depth = 0
+        self._anchor = ""
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in _SKIP_TAGS:
+            self._skip += 1
+        elif tag == "a":
+            self._anchor_depth += 1
+        elif tag in _BLOCK_TAGS:
+            if self._anchor_depth:
+                self._flush_anchor()
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _SKIP_TAGS:
+            self._skip = max(0, self._skip - 1)
+        elif tag == "a":
+            self._flush_anchor()
+        elif tag in _BLOCK_TAGS:
+            self._chunks.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip:
+            return
+        text = data.strip()
+        if not text:
+            return
+        if self._anchor_depth:
+            self._anchor = f"{self._anchor} {text}".strip()
+        else:
+            self._chunks.append(text + " ")
+
+    def _flush_anchor(self) -> None:
+        self._anchor_depth = max(0, self._anchor_depth - 1)
+        if self._anchor:
+            self._chunks.append(self._anchor + "\n")
+        self._anchor = ""
+
+
+def html_to_text(markup: str, max_chars: int = PER_SOURCE_CHARS) -> str:
+    """Strip markup to visible text, one line per element."""
+    reader = _PageReader()
+    reader.feed(markup)
+    reader.close()
+    lines = [line.strip() for line in "".join(reader._chunks).splitlines()]
+    return "\n".join(line for line in lines if line)[:max_chars]
+
+
+def rss_headlines(xml: str, limit: int = 25) -> str:
+    """Extract title/link/pubDate from RSS 2.0 or Atom feeds without a parser lib."""
+    import html as htmllib
+    import re
+
+    items = re.findall(r"<item[ >].*?</item>|<entry[ >].*?</entry>", xml, re.S)
+    lines: list[str] = []
+    for item in items[:limit]:
+        title = re.search(r"<title[^>]*>(.*?)</title>", item, re.S)
+        link = re.search(
+            r"<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>|"
+            r"<link[^>]*href=['\"]([^'\"]+)['\"]",
+            item,
+            re.S,
+        )
+        pub = re.search(
+            r"<pubDate[^>]*>(.*?)</pubDate>|<updated[^>]*>(.*?)</updated>",
+            item,
+            re.S,
+        )
+        if not title:
+            continue
+        title_text = htmllib.unescape(
+            re.sub(r"<!\[CDATA\[|\]\]>", "", title.group(1))
+        ).strip()
+        line = f"- {title_text}"
+        if link:
+            url = (link.group(1) or link.group(2) or "").strip()
+            if url:
+                line = f"{line} ({url})"
+        if pub:
+            date_text = (pub.group(1) or pub.group(2) or "").strip()
+            if date_text:
+                line = f"{line} [{date_text}]"
+        lines.append(line)
+    return "\n".join(lines)[:PER_SOURCE_CHARS]
+
+
+def _json_items(raw: str) -> str:
+    """BNR exposes its news list as JSON; pull titles and optional dates."""
+    import json
+
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return raw[:PER_SOURCE_CHARS]
+    if isinstance(data, dict):
+        data = data.get("data") or data.get("items") or []
+    if not isinstance(data, list):
+        return raw[:PER_SOURCE_CHARS]
+    lines = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name")
+        if not title:
+            continue
+        date = item.get("date") or item.get("created") or item.get("published_at")
+        lines.append(f"- {title} [{date}]" if date else f"- {title}")
+    return "\n".join(lines)[:PER_SOURCE_CHARS]
+
+
+async def fetch_material() -> str:
+    """Fetch every configured source concurrently; failures become a marker line."""
+    import asyncio
+    import warnings
+
     import httpx
 
-    payload = {"model": model, "inputs": prompt, "store": False, "tools": tools}
-    async with httpx.AsyncClient(timeout=300) as client:
-        response = await client.post(
-            "https://api.mistral.ai/v1/conversations",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-        )
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"mistral_conversation failed: HTTP {response.status_code}: {response.text[:300]}"
-        )
-    outputs = response.json().get("outputs") or []
-    for entry in reversed(outputs):
-        if entry.get("type") != "message.output":
-            continue
-        content = entry.get("content")
-        if isinstance(content, list):
-            content = "".join(
-                chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
-                for chunk in content
+    async def fetch_source(
+        client: "httpx.AsyncClient", label: str, url: str, kind: str
+    ) -> str:
+        try:
+            response = await client.get(
+                url, headers={"User-Agent": USER_AGENT, "Accept-Language": "en"}
             )
-        if content:
-            return content
-    raise RuntimeError("mistral_conversation returned no assistant message")
+        except Exception as error:  # noqa: BLE001 - one bad site must not kill the run
+            return f"== {label} ==\n[fetch failed: {type(error).__name__}]"
+        if response.status_code != 200 or not response.text:
+            return f"== {label} ==\n[fetch failed: HTTP {response.status_code}]"
+        if kind == "rss":
+            body = rss_headlines(response.text)
+            if not body.strip():
+                body = html_to_text(response.text)
+        elif kind == "json":
+            body = _json_items(response.text)
+        else:
+            body = html_to_text(response.text)
+        if not body.strip():
+            body = "[no readable content]"
+        return f"== {label} ==\n{body}"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # some .gov.rw certificates are incomplete
+        async with httpx.AsyncClient(
+            timeout=20, follow_redirects=True, verify=False
+        ) as client:
+            blocks = await asyncio.gather(
+                *(
+                    fetch_source(client, label, url, kind)
+                    for label, url, kind in SOURCES
+                )
+            )
+    material = "\n\n".join(blocks)
+    return material[:TOTAL_MATERIAL_CHARS]
+
+
+async def research_findings(api_key: str, date: str) -> str:
+    """Fetch sources, then summarize them via a plain chat-completions call."""
+    material = await fetch_material()
+    payload = {
+        "model": brief_model(),
+        "messages": [
+            {
+                "role": "user",
+                "content": RESEARCH_PROMPT.format(date=date)
+                + MATERIAL_HEADER
+                + material,
+            }
+        ],
+        "max_tokens": 4000,
+    }
+    data = await mistral_chat(api_key, payload)
+    content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    if not content:
+        raise RuntimeError("research returned no content")
+    return content
 
 
 async def mistral_chat(api_key: str, payload: dict) -> dict:
     """One chat-completions API call over HTTP.
 
-    The `mistralai` SDK's request models reject the server-side `web_search`
-    tool, which this brief needs, so the endpoint is called directly. httpx is
-    imported here so importing brief_core stays side-effect free.
+    The `mistralai` SDK's request models reject the server-side tools used by
+    agent surfaces, so the endpoint is called directly. httpx is imported here
+    so importing brief_core stays side-effect free.
     """
     import httpx
 
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(timeout=240) as client:
         response = await client.post(
             "https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
